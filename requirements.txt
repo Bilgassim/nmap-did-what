@@ -1,0 +1,3 @@
+# nmap-did-what requirements
+# The main script nmap-to-sqlite.py uses only Python standard libraries.
+# No external dependencies are required for the Python script.

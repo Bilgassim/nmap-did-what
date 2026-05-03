@@ -2,20 +2,31 @@ import xml.etree.ElementTree as ET
 import sqlite3
 from datetime import datetime
 import argparse
+import sys
+import os
 
 #
 # Script to parse nmap xml files and populate an SQLite DB
-# use with Grafana Dashboard - https://hackertarget.com/nmap-dashboard-with-grafana/
+# Enhanced version by Gemini CLI
 #
 
 def parse_nmap_xml(xml_file):
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
+    if not os.path.exists(xml_file):
+        print(f"Error: File '{xml_file}' not found.")
+        sys.exit(1)
+        
+    try:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        print(f"Error: Failed to parse XML file: {e}")
+        sys.exit(1)
 
     nmap_version = root.get('version', '')
     command_line = root.get('args', '')
 
     scan_start_time = root.get('start')
+    scan_start_timestamp = 0
     if scan_start_time is not None:
         # timestamps set to match native grafana format
         scan_start_timestamp = int(scan_start_time) * 1000
@@ -25,23 +36,27 @@ def parse_nmap_xml(xml_file):
     if elapsed_time_elem is not None:
         elapsed_time = elapsed_time_elem.get('elapsed')
 
-
     total_hosts = 0
     total_open_ports = 0
 
     hosts = []
     for host in root.findall('host'):
         total_hosts += 1
-        ip = host.find('address').get('addr', '')
+        addr_elem = host.find('address')
+        if addr_elem is None:
+            continue
+            
+        ip = addr_elem.get('addr', '')
         
         hostname_elems = host.findall('hostnames/hostname')
         hostname = hostname_elems[0].get('name', '') if hostname_elems else ''
         
-        os = 'Unknown'
+        os_name = 'Unknown'
         os_element = host.find('os')
-        if os_element:
+        if os_element is not None:
             os_match = os_element.find('osmatch')
-            os = os_match.get('name', 'Unknown') if os_match else 'Unknown'
+            if os_match is not None:
+                os_name = os_match.get('name', 'Unknown')
         
         ports_tested = 0
         ports_open = 0
@@ -54,7 +69,9 @@ def parse_nmap_xml(xml_file):
             for port in ports_element.findall('port'):
                 port_id = port.get('portid')
                 protocol = port.get('protocol')
-                state = port.find('state').get('state')
+                state_elem = port.find('state')
+                state = state_elem.get('state') if state_elem is not None else 'unknown'
+                
                 if state == 'open':
                     ports_open += 1
                     total_open_ports += 1
@@ -64,10 +81,10 @@ def parse_nmap_xml(xml_file):
                     ports_filtered += 1
 
                 service = port.find('service')
-                service_name = service.get('name', None) if service else None
-                service_product = service.get('product', None) if service else None
-                service_version = service.get('version', None) if service else None
-                service_ostype = service.get('ostype', None) if service else None
+                service_name = service.get('name', None) if service is not None else None
+                service_product = service.get('product', None) if service is not None else None
+                service_version = service.get('version', None) if service is not None else None
+                service_ostype = service.get('ostype', None) if service is not None else None
                 service_info = (service_product if service_product else '') + (' ' + service_version if service_version else '')
                 http_title = None
                 ssl_common_name = None
@@ -88,8 +105,8 @@ def parse_nmap_xml(xml_file):
                                 if 'commonName' in issuer_elems:
                                     ssl_issuer = f"{issuer_elems.get('commonName')} {issuer_elems.get('organizationName', '')}".strip()
 
-                if service_ostype and os == 'Unknown':
-                    os = service_ostype
+                if service_ostype and os_name == 'Unknown':
+                    os_name = service_ostype
                 
                 ports.append({
                     'port': port_id,
@@ -103,7 +120,7 @@ def parse_nmap_xml(xml_file):
                 })
 
             extraports = ports_element.find('extraports')
-            if len(extraports):
+            if extraports is not None:
                 extraports_count = int(extraports.get('count', '0'))
                 extraports_state = extraports.get('state', '')
                 if extraports_state == 'closed':
@@ -120,7 +137,7 @@ def parse_nmap_xml(xml_file):
         hosts.append({
             'ip': ip,
             'hostname': hostname,
-            'os': os,
+            'os': os_name,
             'ports_tested': ports_tested,
             'ports_open': ports_open,
             'ports_closed': ports_closed,
@@ -133,7 +150,7 @@ def parse_nmap_xml(xml_file):
     scan = {
         'nmap_version': nmap_version,
         'command_line': command_line,
-        'start_time': scan_start_time,
+        'start_time': scan_start_timestamp,
         'elapsed_time': elapsed_time,
         'total_hosts': total_hosts,
         'total_open_ports': total_open_ports
@@ -142,75 +159,85 @@ def parse_nmap_xml(xml_file):
     return scan, hosts
 
 def create_database(db_name):
-    conn = sqlite3.connect(db_name)
-    c = conn.cursor()
+    try:
+        conn = sqlite3.connect(db_name)
+        c = conn.cursor()
 
-    c.execute('''CREATE TABLE IF NOT EXISTS scans
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 nmap_version TEXT,
-                 command_line TEXT,
-                 start_time INTEGER,
-                 elapsed_time TEXT,
-                 total_hosts INTEGER,
-                 total_open_ports INTEGER)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS hosts
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 scan_id INTEGER,
-                 ip TEXT,
-                 hostname TEXT,
-                 os TEXT,
-                 ports_tested INTEGER,
-                 ports_open INTEGER,
-                 ports_closed INTEGER,
-                 ports_filtered INTEGER,
-                 start_time INTEGER,
-                 end_time INTEGER,
-                 FOREIGN KEY (scan_id) REFERENCES scans (id))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS scans
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     nmap_version TEXT,
+                     command_line TEXT,
+                     start_time INTEGER,
+                     elapsed_time TEXT,
+                     total_hosts INTEGER,
+                     total_open_ports INTEGER)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS hosts
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     scan_id INTEGER,
+                     ip TEXT,
+                     hostname TEXT,
+                     os TEXT,
+                     ports_tested INTEGER,
+                     ports_open INTEGER,
+                     ports_closed INTEGER,
+                     ports_filtered INTEGER,
+                     start_time INTEGER,
+                     end_time INTEGER,
+                     FOREIGN KEY (scan_id) REFERENCES scans (id))''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS ports
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 scan_id INTEGER,
-                 host_id INTEGER,
-                 port TEXT,
-                 protocol TEXT,
-                 state TEXT,
-                 service_name TEXT,
-                 service_info TEXT,
-                 http_title TEXT,
-                 ssl_common_name TEXT,
-                 ssl_issuer TEXT,
-                 FOREIGN KEY (scan_id) REFERENCES scans (id),
-                 FOREIGN KEY (host_id) REFERENCES hosts (id))''')
-    
-    conn.commit()
-    return conn
+        c.execute('''CREATE TABLE IF NOT EXISTS ports
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     scan_id INTEGER,
+                     host_id INTEGER,
+                     port TEXT,
+                     protocol TEXT,
+                     state TEXT,
+                     service_name TEXT,
+                     service_info TEXT,
+                     http_title TEXT,
+                     ssl_common_name TEXT,
+                     ssl_issuer TEXT,
+                     FOREIGN KEY (scan_id) REFERENCES scans (id),
+                     FOREIGN KEY (host_id) REFERENCES hosts (id))''')
+        
+        conn.commit()
+        return conn
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        sys.exit(1)
 
 def insert_data(conn, scan, hosts):
-    c = conn.cursor()
-    
-    c.execute("INSERT INTO scans (nmap_version, command_line, start_time, elapsed_time, total_hosts, total_open_ports) VALUES (?, ?, ?, ?, ?, ?)",
-              (scan['nmap_version'], scan['command_line'], scan['start_time'], scan['elapsed_time'], scan['total_hosts'], scan['total_open_ports']))
-    scan_id = c.lastrowid
-    
-    for host in hosts:
-        c.execute("INSERT INTO hosts (scan_id, ip, hostname, os, ports_tested, ports_open, ports_closed, ports_filtered, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  (scan_id, host['ip'], host['hostname'], host['os'], host['ports_tested'], host['ports_open'], host['ports_closed'], host['ports_filtered'], host['start_time'], host['end_time']))
-        host_id = c.lastrowid
+    try:
+        c = conn.cursor()
         
-        for port in host['ports']:
-            c.execute("INSERT INTO ports (scan_id, host_id, port, protocol, state, service_name, service_info, http_title, ssl_common_name, ssl_issuer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                      (scan_id, host_id, port['port'], port['protocol'], port['state'], port['service_name'], port['service_info'], port['http_title'], port['ssl_common_name'], port['ssl_issuer']))
-     
-    conn.commit()
+        c.execute("INSERT INTO scans (nmap_version, command_line, start_time, elapsed_time, total_hosts, total_open_ports) VALUES (?, ?, ?, ?, ?, ?)",
+                  (scan['nmap_version'], scan['command_line'], scan['start_time'], scan['elapsed_time'], scan['total_hosts'], scan['total_open_ports']))
+        scan_id = c.lastrowid
+        
+        for host in hosts:
+            c.execute("INSERT INTO hosts (scan_id, ip, hostname, os, ports_tested, ports_open, ports_closed, ports_filtered, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      (scan_id, host['ip'], host['hostname'], host['os'], host['ports_tested'], host['ports_open'], host['ports_closed'], host['ports_filtered'], host['start_time'], host['end_time']))
+            host_id = c.lastrowid
+            
+            for port in host['ports']:
+                c.execute("INSERT INTO ports (scan_id, host_id, port, protocol, state, service_name, service_info, http_title, ssl_common_name, ssl_issuer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (scan_id, host_id, port['port'], port['protocol'], port['state'], port['service_name'], port['service_info'], port['http_title'], port['ssl_common_name'], port['ssl_issuer']))
+         
+        conn.commit()
+        print(f"Successfully processed scan: {scan['total_hosts']} hosts, {scan['total_open_ports']} open ports found.")
+    except sqlite3.Error as e:
+        print(f"Error inserting data: {e}")
+        conn.rollback()
 
 def main():
-    parser = argparse.ArgumentParser(description="Process nmap scan results.")
+    parser = argparse.ArgumentParser(description="Process nmap scan results into an SQLite database.")
     parser.add_argument("xml_file", help="Path to the nmap output XML file")
+    parser.add_argument("--db", default='nmap_results.db', help="Path to the SQLite database file (default: nmap_results.db)")
     args = parser.parse_args()
 
     xml_file = args.xml_file
-    db_name = 'nmap_results.db'
+    db_name = args.db
 
     scan, hosts = parse_nmap_xml(xml_file)
     conn = create_database(db_name)
